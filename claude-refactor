@@ -31,6 +31,8 @@ readonly REFACTOR_BASE_DIR="${HOME}/.claude-refactor"
 readonly SESSIONS_DIR="${REFACTOR_BASE_DIR}/sessions"
 readonly LOGS_DIR="${REFACTOR_BASE_DIR}/logs"
 readonly TEMPLATES_DIR="${REFACTOR_BASE_DIR}/templates"
+readonly PROMPTS_DIR="${REFACTOR_BASE_DIR}/prompts"
+readonly CONFIG_DIR="${REFACTOR_BASE_DIR}/config"
 readonly SCRIPT_NAME="claude-refactor"
 
 # Ensure base directories exist
@@ -285,9 +287,8 @@ phase_questions() {
     display_phase "1" "Questions Generation" "Analyzing your refactor guide to generate comprehensive questions"
     update_session_phase "questions" "active"
     
-    # Get the script directory
-    local SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local PROMPT_FILE="${SCRIPT_DIR}/prompts/refactor/questions_generator.md"
+    # Use prompts from installation directory
+    local PROMPT_FILE="${PROMPTS_DIR}/refactor/questions_generator.md"
     
     # Check if prompt file exists
     if [[ ! -f "$PROMPT_FILE" ]]; then
@@ -353,9 +354,8 @@ phase_plan() {
     
     while [[ "$plan_accepted" != "true" ]]; do
         if [[ $iteration -eq 0 ]]; then
-            # Get the script directory
-            local SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-            local PROMPT_FILE="${SCRIPT_DIR}/prompts/refactor/plan_generator.md"
+            # Use prompts from installation directory
+            local PROMPT_FILE="${PROMPTS_DIR}/refactor/plan_generator.md"
             
             # Check if prompt file exists
             if [[ ! -f "$PROMPT_FILE" ]]; then
@@ -492,8 +492,7 @@ phase_development() {
 
 create_phase_tasks() {
     local phase_num="$1"
-    local SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local PROMPT_FILE="${SCRIPT_DIR}/prompts/refactor/task_orchestrator.md"
+    local PROMPT_FILE="${PROMPTS_DIR}/refactor/task_orchestrator.md"
     
     if [[ ! -f "$PROMPT_FILE" ]]; then
         log "ERROR" "Task orchestrator prompt not found at: $PROMPT_FILE"
@@ -568,8 +567,7 @@ EOF
 
 review_phase() {
     local phase_num="$1"
-    local SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local PROMPT_FILE="${SCRIPT_DIR}/prompts/refactor/phase_reviewer.md"
+    local PROMPT_FILE="${PROMPTS_DIR}/refactor/phase_reviewer.md"
     
     if [[ ! -f "$PROMPT_FILE" ]]; then
         log "ERROR" "Phase reviewer prompt not found at: $PROMPT_FILE"

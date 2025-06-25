@@ -14,6 +14,8 @@ readonly NC='\033[0m'
 readonly INSTALL_DIR="/usr/local/bin"
 readonly SCRIPT_NAME="claude-refactor"
 readonly SCRIPT_PATH="$(dirname "$0")/${SCRIPT_NAME}"
+readonly CLAUDE_REFACTOR_HOME="$HOME/.claude-refactor"
+readonly SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo -e "${BLUE}═══════════════════════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}              Claude Refactor Installation                          ${NC}"
@@ -55,8 +57,24 @@ fi
 
 # Create necessary directories
 echo -e "${BLUE}Creating directories...${NC}"
-mkdir -p "$HOME/.claude-refactor"/{sessions,logs,templates}
+mkdir -p "$CLAUDE_REFACTOR_HOME"/{sessions,logs,templates,prompts,config}
 echo -e "${GREEN}✓ Created ~/.claude-refactor directories${NC}"
+
+# Copy prompts and config
+echo -e "${BLUE}Installing prompts and configuration...${NC}"
+if [[ -d "$SOURCE_DIR/prompts" ]]; then
+    cp -r "$SOURCE_DIR/prompts" "$CLAUDE_REFACTOR_HOME/"
+    echo -e "${GREEN}✓ Installed prompt library${NC}"
+else
+    echo -e "${YELLOW}⚠ Warning: prompts directory not found${NC}"
+fi
+
+if [[ -d "$SOURCE_DIR/config" ]]; then
+    cp -r "$SOURCE_DIR/config" "$CLAUDE_REFACTOR_HOME/"
+    echo -e "${GREEN}✓ Installed configuration${NC}"
+else
+    echo -e "${YELLOW}⚠ Warning: config directory not found${NC}"
+fi
 
 # Install the CLI
 echo -e "${BLUE}Installing claude-refactor...${NC}"
@@ -153,6 +171,12 @@ EOF
 
 echo -e "${GREEN}✓ Created example guide at ~/.claude-refactor/templates/example-refactor-guide.md${NC}"
 
+# Copy example refactor guide from source if exists
+if [[ -f "$SOURCE_DIR/example-refactor-guide.md" ]]; then
+    cp "$SOURCE_DIR/example-refactor-guide.md" "$CLAUDE_REFACTOR_HOME/templates/"
+    echo -e "${GREEN}✓ Copied additional example guide${NC}"
+fi
+
 # Test installation
 echo
 echo -e "${BLUE}Testing installation...${NC}"
@@ -160,6 +184,12 @@ if command -v claude-refactor &> /dev/null; then
     echo -e "${GREEN}✓ claude-refactor is available in PATH${NC}"
     echo
     echo -e "${GREEN}Installation completed successfully!${NC}"
+    echo
+    echo -e "${BLUE}Installation details:${NC}"
+    echo -e "  Script: $INSTALL_DIR/$SCRIPT_NAME"
+    echo -e "  Prompts: $CLAUDE_REFACTOR_HOME/prompts/"
+    echo -e "  Config: $CLAUDE_REFACTOR_HOME/config/"
+    echo -e "  Sessions: $CLAUDE_REFACTOR_HOME/sessions/"
     echo
     echo -e "${BLUE}Usage:${NC}"
     echo -e "  ${YELLOW}claude-refactor start <guide.md>${NC}  - Start a new refactor"
