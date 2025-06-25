@@ -1,0 +1,25 @@
+# Claude Refactor
+.DS_Store
+*.log
+*.tmp
+*~
+.env
+.env.local
+
+# Session data (local only)
+sessions/
+logs/
+.claude-refactor/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db

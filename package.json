@@ -1,0 +1,33 @@
+{
+  "name": "claude-refactor",
+  "version": "1.0.0",
+  "description": "Intelligent Multi-Agent Refactoring System for Claude Code",
+  "main": "claude-refactor",
+  "bin": {
+    "claude-refactor": "./claude-refactor"
+  },
+  "scripts": {
+    "install": "./install-claude-refactor.sh",
+    "test": "echo \"No tests configured yet\""
+  },
+  "keywords": [
+    "claude",
+    "refactoring",
+    "ai",
+    "automation",
+    "development"
+  ],
+  "author": "samjtro",
+  "license": "MIT",
+  "dependencies": {},
+  "peerDependencies": {
+    "@anthropic-ai/claude-code": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/samjtro/claude-refactor.git"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

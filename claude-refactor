@@ -1,0 +1,817 @@
+#!/usr/bin/env bash
+
+# Claude Refactor - Standalone orchestrator for multi-agent refactoring
+# This tool runs outside Claude Code and manages the entire refactor lifecycle
+
+set -euo pipefail
+
+# Version
+readonly VERSION="1.0.0"
+
+# Color codes for beautiful CLI output
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
+readonly MAGENTA='\033[0;35m'
+readonly CYAN='\033[0;36m'
+readonly WHITE='\033[1;37m'
+readonly GRAY='\033[0;90m'
+readonly NC='\033[0m' # No Color
+
+# Unicode characters for UI
+readonly CHECK="✓"
+readonly CROSS="✗"
+readonly ARROW="→"
+readonly ELLIPSIS="..."
+readonly SPINNER=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+
+# Configuration
+readonly REFACTOR_BASE_DIR="${HOME}/.claude-refactor"
+readonly SESSIONS_DIR="${REFACTOR_BASE_DIR}/sessions"
+readonly LOGS_DIR="${REFACTOR_BASE_DIR}/logs"
+readonly TEMPLATES_DIR="${REFACTOR_BASE_DIR}/templates"
+readonly SCRIPT_NAME="claude-refactor"
+
+# Ensure base directories exist
+mkdir -p "$SESSIONS_DIR" "$LOGS_DIR" "$TEMPLATES_DIR"
+
+# Global variables
+CURRENT_SESSION=""
+CURRENT_SESSION_DIR=""
+DEBUG="${DEBUG:-0}"  # Disable debug for cleaner output
+SPINNER_PID=""
+
+# Utility functions
+log() {
+    local level="$1"
+    shift
+    local message="$*"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    case "$level" in
+        "ERROR")
+            echo -e "${RED}[ERROR]${NC} $message" >&2
+            ;;
+        "WARN")
+            echo -e "${YELLOW}[WARN]${NC} $message" >&2
+            ;;
+        "INFO")
+            echo -e "${BLUE}[INFO]${NC} $message"
+            ;;
+        "SUCCESS")
+            echo -e "${GREEN}[${CHECK}]${NC} $message"
+            ;;
+        "DEBUG")
+            [[ "$DEBUG" == "1" ]] && echo -e "${GRAY}[DEBUG]${NC} $message"
+            ;;
+    esac
+    
+    # Also log to file
+    echo "[$timestamp] [$level] $message" >> "${LOGS_DIR}/claude-refactor.log"
+}
+
+# Spinner functions
+start_spinner() {
+    local message="$1"
+    stop_spinner
+    
+    (
+        local i=0
+        while true; do
+            printf "\r${CYAN}${SPINNER[$i]}${NC} %s" "$message"
+            i=$(( (i + 1) % ${#SPINNER[@]} ))
+            sleep 0.1
+        done
+    ) &
+    SPINNER_PID=$!
+}
+
+stop_spinner() {
+    if [[ -n "$SPINNER_PID" ]] && kill -0 "$SPINNER_PID" 2>/dev/null; then
+        kill "$SPINNER_PID" 2>/dev/null
+        wait "$SPINNER_PID" 2>/dev/null || true
+        printf "\r%*s\r" "${COLUMNS:-80}" ""  # Clear the line
+    fi
+    SPINNER_PID=""
+}
+
+# Display functions
+display_header() {
+    clear
+    local line1="Claude Refactor v${VERSION}"
+    local line2="Intelligent Multi-Agent Refactoring System"
+    local width=75  # Width of the box interior (adjusted)
+    
+    # Calculate padding for centering
+    local pad1=$(( (width - ${#line1}) / 2 ))
+    local pad2=$(( (width - ${#line2}) / 2 ))
+    
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════════════╗${NC}"
+    printf "${CYAN}║${NC}%*s${WHITE}%s${NC}%*s${CYAN}║${NC}\n" $pad1 "" "$line1" $((width - ${#line1} - pad1)) ""
+    printf "${CYAN}║${NC}%*s${GRAY}%s${NC}%*s${CYAN}║${NC}\n" $pad2 "" "$line2" $((width - ${#line2} - pad2)) ""
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════════════╝${NC}"
+    echo
+}
+
+display_phase() {
+    local phase_num="$1"
+    local phase_name="$2"
+    local phase_desc="$3"
+    
+    echo
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${WHITE}Phase ${phase_num}: ${phase_name}${NC}"
+    echo -e "${GRAY}${phase_desc}${NC}"
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo
+}
+
+display_progress() {
+    local current="$1"
+    local total="$2"
+    local width=40
+    local percentage=$((current * 100 / total))
+    local filled=$((width * current / total))
+    
+    printf "\r["
+    printf "%${filled}s" | tr ' ' '█'
+    printf "%$((width - filled))s" | tr ' ' '░'
+    printf "] %3d%%" "$percentage"
+}
+
+# Session management functions
+create_session() {
+    local guide_path="$1"
+    local timestamp=$(date +"%Y%m%d_%H%M%S")
+    CURRENT_SESSION="refactor_${timestamp}"
+    CURRENT_SESSION_DIR="${SESSIONS_DIR}/${CURRENT_SESSION}"
+    
+    mkdir -p "$CURRENT_SESSION_DIR"/{artifacts,logs,prompts,outputs}
+    
+    # Copy guide to session
+    cp "$guide_path" "$CURRENT_SESSION_DIR/GUIDE.md"
+    
+    # Create session metadata
+    cat > "$CURRENT_SESSION_DIR/session.json" <<EOF
+{
+  "session_id": "$CURRENT_SESSION",
+  "created_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "guide_path": "$guide_path",
+  "status": "active",
+  "current_phase": "initialization",
+  "phases": {
+    "questions": {"status": "pending", "started_at": null, "completed_at": null},
+    "plan": {"status": "pending", "started_at": null, "completed_at": null},
+    "development": {"status": "pending", "started_at": null, "completed_at": null},
+    "review": {"status": "pending", "started_at": null, "completed_at": null}
+  }
+}
+EOF
+    
+    log "SUCCESS" "Created session: $CURRENT_SESSION"
+    log "DEBUG" "Session directory: $CURRENT_SESSION_DIR"
+}
+
+update_session_phase() {
+    local phase="$1"
+    local status="$2"
+    local session_file="${CURRENT_SESSION_DIR}/session.json"
+    
+    # Update session.json using jq if available, otherwise use sed
+    if command -v jq &> /dev/null; then
+        local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        jq --arg phase "$phase" --arg status "$status" --arg ts "$timestamp" \
+           '.current_phase = $phase | .phases[$phase].status = $status | 
+            if $status == "active" then .phases[$phase].started_at = $ts
+            elif $status == "completed" then .phases[$phase].completed_at = $ts
+            else . end' \
+           "$session_file" > "${session_file}.tmp" && mv "${session_file}.tmp" "$session_file"
+    fi
+}
+
+# Claude Code execution functions
+check_claude_cli() {
+    if command -v claude &> /dev/null; then
+        log "DEBUG" "Found claude CLI"
+        return 0
+    elif command -v npx &> /dev/null && npx claude-code --version &> /dev/null 2>&1; then
+        log "DEBUG" "Found claude-code via npx"
+        return 0
+    else
+        log "ERROR" "Claude Code CLI not found. Please install with: npm install -g @anthropic-ai/claude-code"
+        log "ERROR" "Or ensure 'claude' is available in your PATH"
+        return 1
+    fi
+}
+
+execute_claude_instance() {
+    local prompt_file="$1"
+    local output_file="$2"
+    local model="${3:-opus}"
+    local max_turns="${4:-10}"
+    local working_dir="${5:-$CURRENT_SESSION_DIR}"
+    
+    log "DEBUG" "Executing Claude instance with model: $model, max_turns: $max_turns"
+    log "DEBUG" "Prompt file: $prompt_file"
+    log "DEBUG" "Output file: $output_file"
+    
+    # Check if ANTHROPIC_API_KEY is set and might be invalid
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        log "DEBUG" "ANTHROPIC_API_KEY is set in environment"
+        # Temporarily unset it to force session auth
+        local saved_api_key="$ANTHROPIC_API_KEY"
+        unset ANTHROPIC_API_KEY
+        log "DEBUG" "Temporarily unsetting ANTHROPIC_API_KEY to use session auth"
+    fi
+    
+    # Determine Claude command - prefer 'claude' if available
+    local claude_cmd
+    if command -v claude &> /dev/null; then
+        claude_cmd="claude"
+    else
+        claude_cmd="npx claude-code"
+    fi
+    
+    # Execute Claude Code in interactive mode
+    cd "$working_dir"
+    
+    # For interactive session, we'll just launch Claude directly
+    # and let the user see the session
+    echo ""
+    echo -e "${CYAN}Launching Claude Code interactive session...${NC}"
+    echo -e "${YELLOW}Instructions will be provided to Claude. Please monitor the session.${NC}"
+    echo -e "${YELLOW}The session will save outputs to the appropriate files.${NC}"
+    echo ""
+    
+    # Show the prompt to the user first
+    echo -e "${GRAY}=== PROMPT FOR CLAUDE ===${NC}"
+    cat "$prompt_file"
+    echo -e "${GRAY}=========================${NC}"
+    echo ""
+    
+    # Launch Claude interactively
+    $claude_cmd --model "$model" --max-turns "$max_turns"
+    local exit_code=$?
+    
+    # Restore API key if it was set
+    if [[ -n "${saved_api_key:-}" ]]; then
+        export ANTHROPIC_API_KEY="$saved_api_key"
+        log "DEBUG" "Restored ANTHROPIC_API_KEY"
+    fi
+    
+    log "DEBUG" "Claude execution completed with exit code: $exit_code"
+    return $exit_code
+}
+
+# Editor integration
+open_in_editor() {
+    local file="$1"
+    local editor="${EDITOR:-nvim}"
+    
+    # Check for nvim preference
+    if command -v nvim &> /dev/null; then
+        editor="nvim"
+    elif command -v vim &> /dev/null; then
+        editor="vim"
+    fi
+    
+    log "INFO" "Opening $file in $editor"
+    $editor "$file"
+}
+
+# Phase 1: Questions Generation
+phase_questions() {
+    display_phase "1" "Questions Generation" "Analyzing your refactor guide to generate comprehensive questions"
+    update_session_phase "questions" "active"
+    
+    # Get the script directory
+    local SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local PROMPT_FILE="${SCRIPT_DIR}/prompts/refactor/questions_generator.md"
+    
+    # Check if prompt file exists
+    if [[ ! -f "$PROMPT_FILE" ]]; then
+        log "ERROR" "Questions generator prompt not found at: $PROMPT_FILE"
+        log "ERROR" "Please ensure prompts are properly installed"
+        return 1
+    fi
+    
+    # Create questions prompt with context
+    cat > "${CURRENT_SESSION_DIR}/prompts/questions_prompt.txt" <<EOF
+You are running in an interactive Claude Code session. The user will see this session.
+
+$(cat "$PROMPT_FILE")
+
+CRITICAL: You MUST create the artifacts directory and save QUESTIONS.md there:
+- First run: mkdir -p artifacts
+- Then create and write your comprehensive questions to artifacts/QUESTIONS.md
+
+Begin by reading GUIDE.md and generating comprehensive questions.
+EOF
+    
+    echo -e "${BLUE}This will launch an interactive Claude session.${NC}"
+    echo -e "${BLUE}Claude will analyze your guide and create QUESTIONS.md${NC}"
+    echo ""
+    
+    execute_claude_instance \
+        "${CURRENT_SESSION_DIR}/prompts/questions_prompt.txt" \
+        "${CURRENT_SESSION_DIR}/logs/questions_generation.log" \
+        "opus" \
+        "10"
+    
+    # After the session, check if questions were created
+    echo ""
+    echo -e "${YELLOW}Claude session completed. Checking for QUESTIONS.md...${NC}"
+    
+    if [[ -f "${CURRENT_SESSION_DIR}/artifacts/QUESTIONS.md" ]]; then
+        log "SUCCESS" "Questions generated successfully"
+        
+        # Let user answer questions
+        echo
+        log "INFO" "Please answer the questions to provide context for the refactor"
+        echo -e "${YELLOW}Press Enter to open the questions in your editor...${NC}"
+        read -r
+        
+        open_in_editor "${CURRENT_SESSION_DIR}/artifacts/QUESTIONS.md"
+        
+        log "SUCCESS" "Questions answered and saved"
+        update_session_phase "questions" "completed"
+        return 0
+    else
+        log "ERROR" "Questions file not created. Please ensure Claude saved QUESTIONS.md to artifacts/"
+        return 1
+    fi
+}
+
+# Phase 2: Plan Generation
+phase_plan() {
+    display_phase "2" "Plan Generation" "Creating a comprehensive refactor plan based on your inputs"
+    update_session_phase "plan" "active"
+    
+    local iteration=0
+    local plan_accepted=false
+    
+    while [[ "$plan_accepted" != "true" ]]; do
+        if [[ $iteration -eq 0 ]]; then
+            # Get the script directory
+            local SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            local PROMPT_FILE="${SCRIPT_DIR}/prompts/refactor/plan_generator.md"
+            
+            # Check if prompt file exists
+            if [[ ! -f "$PROMPT_FILE" ]]; then
+                log "ERROR" "Plan generator prompt not found at: $PROMPT_FILE"
+                return 1
+            fi
+            
+            # Initial plan generation
+            cat > "${CURRENT_SESSION_DIR}/prompts/plan_prompt.txt" <<EOF
+$(cat "$PROMPT_FILE")
+
+CRITICAL: You MUST create and save PLAN.md to artifacts/:
+- Ensure artifacts directory exists
+- Save your comprehensive plan to artifacts/PLAN.md
+
+Read GUIDE.md and artifacts/QUESTIONS.md, then create the plan.
+EOF
+        else
+            # Plan update based on user feedback
+            cat > "${CURRENT_SESSION_DIR}/prompts/plan_update_prompt.txt" <<'EOF'
+You are updating the refactor plan based on user feedback.
+
+INSTRUCTIONS:
+1. ULTRATHINK as an expert PM to examine the differences between the originally generated PLAN.md and the new UPDATED_PLAN.md
+2. Go over the guide multiple times to fully understand the scope of what the user is attempting to accomplish
+3. Understand the user's requested changes and their implications
+4. Generate a new plan that incorporates all user-requested updates
+5. Maintain consistency across all phases
+6. Save the updated plan to artifacts/PLAN.md
+
+Focus on:
+- Understanding why the user made specific changes
+- Ensuring the updates improve the plan's effectiveness
+- Maintaining coherence with the overall refactor goals
+- Adjusting dependencies and timelines if needed
+
+Read all artifacts and generate the improved plan.
+EOF
+        fi
+        
+        local prompt_file
+        if [[ $iteration -eq 0 ]]; then
+            prompt_file="${CURRENT_SESSION_DIR}/prompts/plan_prompt.txt"
+        else
+            prompt_file="${CURRENT_SESSION_DIR}/prompts/plan_update_prompt.txt"
+        fi
+        
+        start_spinner "Generating refactor plan with Claude Opus (iteration $((iteration + 1)))"
+        
+        if execute_claude_instance \
+            "$prompt_file" \
+            "${CURRENT_SESSION_DIR}/logs/plan_generation_${iteration}.log" \
+            "opus" \
+            "10"; then
+            
+            stop_spinner
+            
+            if [[ -f "${CURRENT_SESSION_DIR}/artifacts/PLAN.md" ]]; then
+                log "SUCCESS" "Plan generated successfully"
+                
+                # Copy for user editing
+                cp "${CURRENT_SESSION_DIR}/artifacts/PLAN.md" \
+                   "${CURRENT_SESSION_DIR}/artifacts/UPDATED_PLAN.md"
+                
+                echo
+                log "INFO" "Review the generated plan and make any necessary changes"
+                echo -e "${YELLOW}Press Enter to open the plan in your editor...${NC}"
+                read -r
+                
+                open_in_editor "${CURRENT_SESSION_DIR}/artifacts/UPDATED_PLAN.md"
+                
+                # Check if plan was modified
+                if ! cmp -s "${CURRENT_SESSION_DIR}/artifacts/PLAN.md" \
+                          "${CURRENT_SESSION_DIR}/artifacts/UPDATED_PLAN.md"; then
+                    log "INFO" "Plan modifications detected, regenerating..."
+                    ((iteration++))
+                else
+                    log "SUCCESS" "Plan accepted without modifications"
+                    plan_accepted="true"
+                fi
+            else
+                log "ERROR" "Plan file not created"
+                return 1
+            fi
+        else
+            stop_spinner
+            log "ERROR" "Failed to generate plan"
+            return 1
+        fi
+        
+        # Safety check
+        if [[ $iteration -gt 10 ]]; then
+            log "WARN" "Maximum plan iterations reached"
+            plan_accepted="true"
+        fi
+    done
+    
+    update_session_phase "plan" "completed"
+    return 0
+}
+
+# Phase 3: Development Lifecycle
+phase_development() {
+    display_phase "3" "Development Lifecycle" "Executing multi-agent development with task distribution"
+    update_session_phase "development" "active"
+    
+    # Extract phases from plan
+    log "INFO" "Analyzing plan to extract development phases..."
+    
+    # For now, we'll simulate phase extraction
+    # In a real implementation, we'd parse PLAN.md to get actual phases
+    local num_phases=3  # This would be dynamically determined
+    
+    for ((phase_num=1; phase_num<=num_phases; phase_num++)); do
+        echo
+        log "INFO" "Starting Phase $phase_num development"
+        
+        # Create task list for phase
+        create_phase_tasks "$phase_num"
+        
+        # Execute development tasks
+        execute_phase_development "$phase_num"
+        
+        # Review phase
+        review_phase "$phase_num"
+        
+        display_progress "$phase_num" "$num_phases"
+        echo
+    done
+    
+    update_session_phase "development" "completed"
+    return 0
+}
+
+create_phase_tasks() {
+    local phase_num="$1"
+    local SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local PROMPT_FILE="${SCRIPT_DIR}/prompts/refactor/task_orchestrator.md"
+    
+    if [[ ! -f "$PROMPT_FILE" ]]; then
+        log "ERROR" "Task orchestrator prompt not found at: $PROMPT_FILE"
+        return 1
+    fi
+    
+    cat > "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_tasks.txt" <<EOF
+Phase Number: $phase_num
+Current Timestamp: $(date +%s)
+
+$(cat "$PROMPT_FILE")
+
+Focus specifically on Phase $phase_num as defined in artifacts/PLAN.md.
+Create comprehensive tasks and save to artifacts/TASKS_PHASE${phase_num}_$(date +%s).md
+EOF
+    
+    start_spinner "Creating tasks for Phase $phase_num"
+    
+    execute_claude_instance \
+        "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_tasks.txt" \
+        "${CURRENT_SESSION_DIR}/logs/phase_${phase_num}_tasks.log" \
+        "opus" \
+        "10"
+    
+    stop_spinner
+    log "SUCCESS" "Tasks created for Phase $phase_num"
+}
+
+execute_phase_development() {
+    local phase_num="$1"
+    
+    # Find the tasks file
+    local tasks_file=$(find "${CURRENT_SESSION_DIR}/artifacts" -name "TASKS_PHASE${phase_num}_*.md" | head -1)
+    
+    if [[ -z "$tasks_file" ]]; then
+        log "ERROR" "No tasks file found for Phase $phase_num"
+        return 1
+    fi
+    
+    # Create development orchestrator prompt
+    cat > "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_develop.txt" <<EOF
+You are orchestrating development for Phase $phase_num using an Opus model that will spawn Sonnet instances.
+
+INSTRUCTIONS:
+1. Read the tasks from $(basename "$tasks_file")
+2. For each task, spin up a single prompt Sonnet ultrathink session:
+   - Use 'claude --model sonnet-3.5 --single-turn' for each task
+   - Provide a comprehensive plan to solve the task with ultrathinking
+   - Ground the model in the task based on all high-level and granular research
+   - Track completion in artifacts/phase_${phase_num}_status.json
+3. After all tasks are accomplished:
+   - Have a new single prompt Sonnet ultrathink session establish a full-coverage test suite
+   - Run a final non-single prompt session in an interactive environment until tests pass
+4. Create comprehensive test suite in artifacts/phase_${phase_num}_tests/
+
+IMPORTANT: You must actually execute the development tasks by spawning Sonnet instances.
+
+Begin development for Phase $phase_num.
+EOF
+    
+    start_spinner "Executing Phase $phase_num development tasks"
+    
+    execute_claude_instance \
+        "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_develop.txt" \
+        "${CURRENT_SESSION_DIR}/logs/phase_${phase_num}_development.log" \
+        "opus" \
+        "20"
+    
+    stop_spinner
+    log "SUCCESS" "Phase $phase_num development completed"
+}
+
+review_phase() {
+    local phase_num="$1"
+    local SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local PROMPT_FILE="${SCRIPT_DIR}/prompts/refactor/phase_reviewer.md"
+    
+    if [[ ! -f "$PROMPT_FILE" ]]; then
+        log "ERROR" "Phase reviewer prompt not found at: $PROMPT_FILE"
+        return 1
+    fi
+    
+    cat > "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_review.txt" <<EOF
+Phase Number: $phase_num
+
+$(cat "$PROMPT_FILE")
+
+Focus on reviewing Phase $phase_num implementation.
+Save your review report to artifacts/phase_${phase_num}_review.md
+EOF
+    
+    start_spinner "Reviewing Phase $phase_num implementation"
+    
+    execute_claude_instance \
+        "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_review.txt" \
+        "${CURRENT_SESSION_DIR}/logs/phase_${phase_num}_review.log" \
+        "opus" \
+        "10"
+    
+    stop_spinner
+    
+    # Check review result
+    local review_file="${CURRENT_SESSION_DIR}/artifacts/phase_${phase_num}_review.md"
+    if [[ -f "$review_file" ]] && grep -q "PASS" "$review_file"; then
+        log "SUCCESS" "Phase $phase_num passed review"
+    else
+        log "WARN" "Phase $phase_num requires attention"
+    fi
+}
+
+# Phase 4: Final Review
+phase_final_review() {
+    display_phase "4" "Final Review" "Comprehensive review of the entire refactor implementation"
+    update_session_phase "review" "active"
+    
+    cat > "${CURRENT_SESSION_DIR}/prompts/final_review.txt" <<'EOF'
+You are conducting a comprehensive final review of the entire refactor.
+
+REVIEW SCOPE:
+1. Original Requirements (GUIDE.md)
+   - Verify all requirements are met
+   - Check alignment with user's vision
+   
+2. Implementation Quality
+   - Review all phase implementations
+   - Check code quality and consistency
+   - Verify integration between phases
+   
+3. Test Coverage
+   - Ensure all functionality is tested
+   - Verify tests are passing
+   
+4. Documentation
+   - Check implementation documentation
+   - Verify decision records
+   
+5. Deliverables
+   - All planned features implemented
+   - No critical issues remaining
+   - Ready for production
+
+CREATE:
+1. artifacts/FINAL_REVIEW.md with:
+   - Executive summary
+   - Detailed findings
+   - Issue list (if any)
+   - Final verdict: APPROVED or NEEDS_WORK
+   
+2. artifacts/DELIVERABLES.md with:
+   - What was built
+   - How to use it
+   - Important notes
+
+Conduct the comprehensive final review.
+EOF
+    
+    start_spinner "Conducting final review with Claude Opus"
+    
+    execute_claude_instance \
+        "${CURRENT_SESSION_DIR}/prompts/final_review.txt" \
+        "${CURRENT_SESSION_DIR}/logs/final_review.log" \
+        "opus" \
+        "15"
+    
+    stop_spinner
+    
+    # Display results
+    local review_file="${CURRENT_SESSION_DIR}/artifacts/FINAL_REVIEW.md"
+    if [[ -f "$review_file" ]]; then
+        if grep -q "APPROVED" "$review_file"; then
+            log "SUCCESS" "REFACTOR APPROVED - All requirements met!"
+        else
+            log "WARN" "Refactor needs attention - see review report"
+        fi
+    fi
+    
+    update_session_phase "review" "completed"
+    return 0
+}
+
+# Main workflow
+run_refactor() {
+    local guide_path="$1"
+    
+    display_header
+    
+    # Create session
+    create_session "$guide_path"
+    
+    echo
+    log "INFO" "Starting refactor workflow"
+    log "INFO" "Session: $CURRENT_SESSION"
+    echo
+    
+    # Execute phases
+    if phase_questions && phase_plan && phase_development && phase_final_review; then
+        echo
+        echo -e "${GREEN}╔═══════════════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${GREEN}║${NC}                   ${WHITE}REFACTOR COMPLETED SUCCESSFULLY${NC}                        ${GREEN}║${NC}"
+        echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════════════╝${NC}"
+        echo
+        log "INFO" "Session artifacts: $CURRENT_SESSION_DIR"
+        log "INFO" "Review report: $CURRENT_SESSION_DIR/artifacts/FINAL_REVIEW.md"
+        echo
+    else
+        echo
+        log "ERROR" "Refactor workflow failed"
+        log "INFO" "Check logs at: $CURRENT_SESSION_DIR/logs/"
+        exit 1
+    fi
+}
+
+# Command handlers
+show_usage() {
+    display_header
+    echo "Usage: claude-refactor [COMMAND] [OPTIONS]"
+    echo
+    echo "Commands:"
+    echo "  start <guide.md>    Start a new refactor with the specified guide"
+    echo "  list               List all refactor sessions"
+    echo "  resume <session>   Resume an interrupted session"
+    echo "  clean              Clean old sessions"
+    echo "  version            Show version information"
+    echo
+    echo "Options:"
+    echo "  -h, --help         Show this help message"
+    echo "  -d, --debug        Enable debug output"
+    echo
+    echo "Examples:"
+    echo "  claude-refactor start ./docs/auth-refactor.md"
+    echo "  claude-refactor list"
+    echo "  claude-refactor resume refactor_20241224_143022"
+    echo
+}
+
+list_sessions() {
+    display_header
+    echo -e "${WHITE}Refactor Sessions:${NC}"
+    echo
+    
+    if [[ -d "$SESSIONS_DIR" ]]; then
+        for session in "$SESSIONS_DIR"/*; do
+            if [[ -d "$session" ]]; then
+                local session_name=$(basename "$session")
+                local session_json="$session/session.json"
+                
+                if [[ -f "$session_json" ]]; then
+                    local created_at=$(grep '"created_at"' "$session_json" | cut -d'"' -f4)
+                    local status=$(grep '"status"' "$session_json" | head -1 | cut -d'"' -f4)
+                    local current_phase=$(grep '"current_phase"' "$session_json" | cut -d'"' -f4)
+                    
+                    echo -e "  ${CYAN}${session_name}${NC}"
+                    echo -e "    Created: ${created_at}"
+                    echo -e "    Status: ${status}"
+                    echo -e "    Phase: ${current_phase}"
+                    echo
+                fi
+            fi
+        done
+    else
+        echo "  No sessions found"
+    fi
+}
+
+# Main entry point
+main() {
+    # Parse arguments
+    case "${1:-}" in
+        "start")
+            if [[ -z "${2:-}" ]]; then
+                log "ERROR" "Please provide a refactor guide file"
+                show_usage
+                exit 1
+            fi
+            
+            if [[ ! -f "$2" ]]; then
+                log "ERROR" "Guide file not found: $2"
+                exit 1
+            fi
+            
+            # Check Claude CLI
+            if ! check_claude_cli; then
+                exit 1
+            fi
+            
+            run_refactor "$2"
+            ;;
+            
+        "list")
+            list_sessions
+            ;;
+            
+        "resume")
+            log "INFO" "Session resume not yet implemented"
+            ;;
+            
+        "clean")
+            log "INFO" "Session cleanup not yet implemented"
+            ;;
+            
+        "version")
+            echo "Claude Refactor v${VERSION}"
+            ;;
+            
+        "-h"|"--help"|"")
+            show_usage
+            ;;
+            
+        *)
+            log "ERROR" "Unknown command: $1"
+            show_usage
+            exit 1
+            ;;
+    esac
+}
+
+# Handle interrupts gracefully
+trap 'stop_spinner; echo; log "WARN" "Interrupted by user"; exit 130' INT TERM
+
+# Run main with all arguments
+main "$@"

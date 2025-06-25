@@ -1,0 +1,70 @@
+{
+  "claude_refactor": {
+    "version": "1.0.0",
+    "models": {
+      "orchestrator": "opus",
+      "implementation": "sonnet-3.5",
+      "review": "opus"
+    },
+    "max_turns": {
+      "questions": 10,
+      "plan": 10,
+      "development": 20,
+      "review": 15,
+      "test": 10
+    },
+    "paths": {
+      "prompts": "prompts/",
+      "sessions": "~/.claude-refactor/sessions",
+      "logs": "~/.claude-refactor/logs",
+      "templates": "~/.claude-refactor/templates"
+    },
+    "workflow": {
+      "phases": [
+        {
+          "name": "questions",
+          "description": "Generate comprehensive questions about the refactor",
+          "model": "opus",
+          "prompt": "prompts/refactor/questions_generator.md"
+        },
+        {
+          "name": "plan",
+          "description": "Create detailed implementation plan",
+          "model": "opus",
+          "prompt": "prompts/refactor/plan_generator.md"
+        },
+        {
+          "name": "development",
+          "description": "Execute development tasks",
+          "orchestrator_model": "opus",
+          "implementation_model": "sonnet-3.5",
+          "prompts": {
+            "orchestrator": "prompts/refactor/task_orchestrator.md",
+            "implementation": "prompts/agents/developer.md"
+          }
+        },
+        {
+          "name": "review",
+          "description": "Review phase implementation",
+          "model": "opus",
+          "prompt": "prompts/refactor/phase_reviewer.md"
+        }
+      ]
+    },
+    "memory_bank": {
+      "format": "markdown",
+      "structure": "multi-file",
+      "templates": {
+        "entry": "prompts/apm/02_Utility_Prompts_And_Format_Definitions/Memory_Bank_Log_Format.md"
+      }
+    },
+    "handover": {
+      "enabled": true,
+      "threshold": 0.8,
+      "templates": {
+        "file": "prompts/apm/02_Utility_Prompts_And_Format_Definitions/Handover_Artifact_Format.md",
+        "prompt": "prompts/apm/01_Manager_Agent_Core_Guides/05_Handover_Protocol_Guide.md"
+      }
+    }
+  }
+}
