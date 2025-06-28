@@ -125,8 +125,29 @@ Create a well-structured markdown document with:
 - Group related questions together
 - Ensure questions build upon each other logically
 
-## Output
+## Output Requirements
 
-Save your comprehensive questions to `artifacts/QUESTIONS.md`
+### File Creation
+You MUST create the questions file with this EXACT format:
+
+```
+<<<CREATE_FILE: QUESTIONS.md
+[Your complete questions document here]
+>>>END_FILE
+```
+
+### Status Marker
+End your response with:
+```
+<<<STATUS: COMPLETE
+- Created: QUESTIONS.md
+- Summary: Generated comprehensive refactor questions
+>>>END_STATUS
+```
+
+### Alternative (if file markers don't work)
+If the above format isn't recognized, use:
+1. Create directory: `mkdir -p artifacts`
+2. Save to: `artifacts/QUESTIONS.md`
 
 Remember: These questions are vitally important for the success of the project and will be used to generate a comprehensive plan of action.

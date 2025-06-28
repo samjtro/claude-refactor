@@ -38,6 +38,21 @@ readonly SCRIPT_NAME="claude-refactor"
 # Ensure base directories exist
 mkdir -p "$SESSIONS_DIR" "$LOGS_DIR" "$TEMPLATES_DIR"
 
+# Source the executor libraries
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Try to load from installation directory first, then script directory
+for lib in "claude_executor.sh" "claude_session_automator.sh" "claude_hybrid_executor.sh"; do
+    if [[ -f "${REFACTOR_BASE_DIR}/lib/$lib" ]]; then
+        source "${REFACTOR_BASE_DIR}/lib/$lib"
+    elif [[ -f "${SCRIPT_DIR}/lib/$lib" ]]; then
+        source "${SCRIPT_DIR}/lib/$lib"
+    fi
+done
+
+# Set execution mode from environment or default
+CLAUDE_REFACTOR_MODE="${CLAUDE_REFACTOR_MODE:-hybrid}"
+
 # Global variables
 CURRENT_SESSION=""
 CURRENT_SESSION_DIR=""
@@ -213,18 +228,21 @@ execute_claude_instance() {
     local model="${3:-opus}"
     local max_turns="${4:-10}"
     local working_dir="${5:-$CURRENT_SESSION_DIR}"
+    local mode="${6:-auto}"  # auto, interactive, or print
     
-    log "DEBUG" "Executing Claude instance with model: $model, max_turns: $max_turns"
+    log "DEBUG" "Executing Claude instance with model: $model, max_turns: $max_turns, mode: $mode"
     log "DEBUG" "Prompt file: $prompt_file"
     log "DEBUG" "Output file: $output_file"
     
     # Check if ANTHROPIC_API_KEY is set and might be invalid
     if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
         log "DEBUG" "ANTHROPIC_API_KEY is set in environment"
-        # Temporarily unset it to force session auth
-        local saved_api_key="$ANTHROPIC_API_KEY"
-        unset ANTHROPIC_API_KEY
-        log "DEBUG" "Temporarily unsetting ANTHROPIC_API_KEY to use session auth"
+        # Check if it looks valid
+        if [[ ! "$ANTHROPIC_API_KEY" =~ ^sk- ]]; then
+            log "DEBUG" "API key appears invalid, temporarily unsetting"
+            local saved_api_key="$ANTHROPIC_API_KEY"
+            unset ANTHROPIC_API_KEY
+        fi
     fi
     
     # Determine Claude command - prefer 'claude' if available
@@ -235,26 +253,64 @@ execute_claude_instance() {
         claude_cmd="npx claude-code"
     fi
     
-    # Execute Claude Code in interactive mode
+    # Execute Claude Code
     cd "$working_dir"
     
-    # For interactive session, we'll just launch Claude directly
-    # and let the user see the session
-    echo ""
-    echo -e "${CYAN}Launching Claude Code interactive session...${NC}"
-    echo -e "${YELLOW}Instructions will be provided to Claude. Please monitor the session.${NC}"
-    echo -e "${YELLOW}The session will save outputs to the appropriate files.${NC}"
-    echo ""
+    local exit_code
     
-    # Show the prompt to the user first
-    echo -e "${GRAY}=== PROMPT FOR CLAUDE ===${NC}"
-    cat "$prompt_file"
-    echo -e "${GRAY}=========================${NC}"
-    echo ""
-    
-    # Launch Claude interactively
-    $claude_cmd --model "$model" --max-turns "$max_turns"
-    local exit_code=$?
+    if [[ "$mode" == "print" ]] || [[ "$mode" == "auto" ]]; then
+        # Non-interactive mode with print flag
+        log "INFO" "Running Claude in automated mode..."
+        
+        # Read prompt content
+        local prompt_content=$(cat "$prompt_file")
+        
+        # Execute Claude with print flag and capture output
+        start_spinner "Claude is working on the task"
+        
+        # Run Claude and capture both stdout and stderr
+        local claude_output
+        claude_output=$($claude_cmd --model "$model" --max-turns "$max_turns" -p "$prompt_content" 2>&1)
+        exit_code=$?
+        
+        stop_spinner
+        
+        # Save output to file
+        echo "$claude_output" > "$output_file"
+        
+        # Display relevant output to user
+        if [[ $exit_code -eq 0 ]]; then
+            log "SUCCESS" "Claude completed the task"
+            
+            # Show a summary of what was done
+            echo ""
+            echo -e "${CYAN}=== Claude Output Summary ===${NC}"
+            # Show last 20 lines of output (usually contains summary)
+            echo "$claude_output" | tail -20
+            echo -e "${CYAN}===========================${NC}"
+            echo ""
+        else
+            log "ERROR" "Claude execution failed with exit code: $exit_code"
+            echo "$claude_output"
+        fi
+    else
+        # Interactive mode (fallback)
+        echo ""
+        echo -e "${CYAN}Launching Claude Code interactive session...${NC}"
+        echo -e "${YELLOW}Instructions will be provided to Claude. Please monitor the session.${NC}"
+        echo -e "${YELLOW}The session will save outputs to the appropriate files.${NC}"
+        echo ""
+        
+        # Show the prompt to the user first
+        echo -e "${GRAY}=== PROMPT FOR CLAUDE ===${NC}"
+        cat "$prompt_file"
+        echo -e "${GRAY}=========================${NC}"
+        echo ""
+        
+        # Launch Claude interactively
+        $claude_cmd --model "$model" --max-turns "$max_turns" < "$prompt_file"
+        exit_code=$?
+    fi
     
     # Restore API key if it was set
     if [[ -n "${saved_api_key:-}" ]]; then
@@ -297,33 +353,37 @@ phase_questions() {
         return 1
     fi
     
-    # Create questions prompt with context
+    # Create questions prompt
     cat > "${CURRENT_SESSION_DIR}/prompts/questions_prompt.txt" <<EOF
-You are running in an interactive Claude Code session. The user will see this session.
-
 $(cat "$PROMPT_FILE")
 
-CRITICAL: You MUST create the artifacts directory and save QUESTIONS.md there:
-- First run: mkdir -p artifacts
-- Then create and write your comprehensive questions to artifacts/QUESTIONS.md
-
-Begin by reading GUIDE.md and generating comprehensive questions.
+IMPORTANT: Read the GUIDE.md file in this directory and generate comprehensive questions.
 EOF
     
-    echo -e "${BLUE}This will launch an interactive Claude session.${NC}"
-    echo -e "${BLUE}Claude will analyze your guide and create QUESTIONS.md${NC}"
-    echo ""
+    # Use hybrid executor if available
+    if type -t execute_claude_smart &> /dev/null; then
+        if ! execute_claude_smart \
+            "Questions Generation" \
+            "${CURRENT_SESSION_DIR}/prompts/questions_prompt.txt" \
+            "$CURRENT_SESSION_DIR" \
+            "opus" \
+            "QUESTIONS.md"; then
+            log "ERROR" "execute_claude_smart failed"
+        fi
+    else
+        start_spinner "Generating comprehensive questions with Claude Opus"
+        # Fallback to basic execution
+        execute_claude_instance \
+            "${CURRENT_SESSION_DIR}/prompts/questions_prompt.txt" \
+            "${CURRENT_SESSION_DIR}/logs/questions_generation.log" \
+            "opus" \
+            "10" \
+            "$CURRENT_SESSION_DIR" \
+            "auto"
+        stop_spinner
+    fi
     
-    execute_claude_instance \
-        "${CURRENT_SESSION_DIR}/prompts/questions_prompt.txt" \
-        "${CURRENT_SESSION_DIR}/logs/questions_generation.log" \
-        "opus" \
-        "10"
-    
-    # After the session, check if questions were created
-    echo ""
-    echo -e "${YELLOW}Claude session completed. Checking for QUESTIONS.md...${NC}"
-    
+    # Check if questions were created
     if [[ -f "${CURRENT_SESSION_DIR}/artifacts/QUESTIONS.md" ]]; then
         log "SUCCESS" "Questions generated successfully"
         
@@ -339,7 +399,27 @@ EOF
         update_session_phase "questions" "completed"
         return 0
     else
-        log "ERROR" "Questions file not created. Please ensure Claude saved QUESTIONS.md to artifacts/"
+        log "ERROR" "Questions file not created at ${CURRENT_SESSION_DIR}/artifacts/QUESTIONS.md"
+        log "DEBUG" "Checking for output files..."
+        
+        # Check for any Claude output files
+        if ls "${CURRENT_SESSION_DIR}"/.claude_output*.txt 1> /dev/null 2>&1; then
+            log "DEBUG" "Found Claude output files:"
+            for f in "${CURRENT_SESSION_DIR}"/.claude_output*.txt; do
+                log "DEBUG" "  - $(basename "$f")"
+                if [[ "$DEBUG" == "1" ]]; then
+                    echo "=== Content of $(basename "$f") ==="
+                    head -50 "$f"
+                    echo "=== End content ==="
+                fi
+            done
+        fi
+        
+        # Check logs directory
+        if ls "${CURRENT_SESSION_DIR}/logs"/*.log 1> /dev/null 2>&1; then
+            log "DEBUG" "Check logs in: ${CURRENT_SESSION_DIR}/logs/"
+        fi
+        
         return 1
     fi
 }
@@ -409,7 +489,9 @@ EOF
             "$prompt_file" \
             "${CURRENT_SESSION_DIR}/logs/plan_generation_${iteration}.log" \
             "opus" \
-            "10"; then
+            "10" \
+            "$CURRENT_SESSION_DIR" \
+            "auto"; then
             
             stop_spinner
             
@@ -515,7 +597,9 @@ EOF
         "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_tasks.txt" \
         "${CURRENT_SESSION_DIR}/logs/phase_${phase_num}_tasks.log" \
         "opus" \
-        "10"
+        "10" \
+        "$CURRENT_SESSION_DIR" \
+        "auto"
     
     stop_spinner
     log "SUCCESS" "Tasks created for Phase $phase_num"
@@ -532,36 +616,61 @@ execute_phase_development() {
         return 1
     fi
     
-    # Create development orchestrator prompt
-    cat > "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_develop.txt" <<EOF
-You are orchestrating development for Phase $phase_num using an Opus model that will spawn Sonnet instances.
+    log "INFO" "Executing tasks from: $(basename "$tasks_file")"
+    
+    # Use the new task executor if available
+    if type -t execute_task_list &> /dev/null; then
+        # Execute each task using the task list executor
+        execute_task_list "$tasks_file" "$CURRENT_SESSION_DIR" "$phase_num"
+        
+        # Create test suite prompt
+        cat > "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_tests.txt" <<EOF
+You are creating a comprehensive test suite for Phase $phase_num.
 
-INSTRUCTIONS:
-1. Read the tasks from $(basename "$tasks_file")
-2. For each task, spin up a single prompt Sonnet ultrathink session:
-   - Use 'claude --model sonnet-3.5 --single-turn' for each task
-   - Provide a comprehensive plan to solve the task with ultrathinking
-   - Ground the model in the task based on all high-level and granular research
-   - Track completion in artifacts/phase_${phase_num}_status.json
-3. After all tasks are accomplished:
-   - Have a new single prompt Sonnet ultrathink session establish a full-coverage test suite
-   - Run a final non-single prompt session in an interactive environment until tests pass
-4. Create comprehensive test suite in artifacts/phase_${phase_num}_tests/
+Review all the implementation work done in this phase and create:
+1. Unit tests for all new functionality
+2. Integration tests for component interactions
+3. End-to-end tests for user workflows
+4. Performance benchmarks where applicable
 
-IMPORTANT: You must actually execute the development tasks by spawning Sonnet instances.
-
-Begin development for Phase $phase_num.
+Create the test files using the artifact format.
 EOF
+        
+        log "INFO" "Generating test suite for Phase $phase_num"
+        execute_claude_with_artifacts \
+            "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_tests.txt" \
+            "$CURRENT_SESSION_DIR" \
+            "sonnet-3.5" \
+            "10" \
+            ""
+    else
+        # Fallback to old orchestrator approach
+        cat > "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_develop.txt" <<EOF
+You are orchestrating development for Phase $phase_num.
+
+Read the tasks from $(basename "$tasks_file") and implement each one.
+For each task:
+1. ULTRATHINK through the requirements
+2. Implement the solution
+3. Create any necessary files
+4. Document your changes
+
+After implementing all tasks, create a comprehensive test suite.
+EOF
+        
+        start_spinner "Executing Phase $phase_num development tasks"
+        
+        execute_claude_instance \
+            "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_develop.txt" \
+            "${CURRENT_SESSION_DIR}/logs/phase_${phase_num}_development.log" \
+            "opus" \
+            "20" \
+            "$CURRENT_SESSION_DIR" \
+            "auto"
+        
+        stop_spinner
+    fi
     
-    start_spinner "Executing Phase $phase_num development tasks"
-    
-    execute_claude_instance \
-        "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_develop.txt" \
-        "${CURRENT_SESSION_DIR}/logs/phase_${phase_num}_development.log" \
-        "opus" \
-        "20"
-    
-    stop_spinner
     log "SUCCESS" "Phase $phase_num development completed"
 }
 
@@ -589,7 +698,9 @@ EOF
         "${CURRENT_SESSION_DIR}/prompts/phase_${phase_num}_review.txt" \
         "${CURRENT_SESSION_DIR}/logs/phase_${phase_num}_review.log" \
         "opus" \
-        "10"
+        "10" \
+        "$CURRENT_SESSION_DIR" \
+        "auto"
     
     stop_spinner
     
@@ -654,7 +765,9 @@ EOF
         "${CURRENT_SESSION_DIR}/prompts/final_review.txt" \
         "${CURRENT_SESSION_DIR}/logs/final_review.log" \
         "opus" \
-        "15"
+        "15" \
+        "$CURRENT_SESSION_DIR" \
+        "auto"
     
     stop_spinner
     
@@ -719,11 +832,21 @@ show_usage() {
     echo "Options:"
     echo "  -h, --help         Show this help message"
     echo "  -d, --debug        Enable debug output"
+    echo "  -m, --mode MODE    Execution mode: auto|hybrid|interactive (default: hybrid)"
+    echo
+    echo "Environment Variables:"
+    echo "  CLAUDE_REFACTOR_MODE    Set default execution mode"
+    echo "  ANTHROPIC_API_KEY       Use API mode if set"
+    echo
+    echo "Execution Modes:"
+    echo "  auto         Try full automation (requires good CLI support)"
+    echo "  hybrid       Interactive with automation assists (recommended)"
+    echo "  interactive  Pure interactive mode with guidance"
     echo
     echo "Examples:"
     echo "  claude-refactor start ./docs/auth-refactor.md"
-    echo "  claude-refactor list"
-    echo "  claude-refactor resume refactor_20241224_143022"
+    echo "  claude-refactor --mode auto start ./guide.md"
+    echo "  CLAUDE_REFACTOR_MODE=interactive claude-refactor start ./guide.md"
     echo
 }
 
@@ -758,7 +881,33 @@ list_sessions() {
 
 # Main entry point
 main() {
-    # Parse arguments
+    # Parse global options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -m|--mode)
+                CLAUDE_REFACTOR_MODE="$2"
+                shift 2
+                ;;
+            -d|--debug)
+                DEBUG=1
+                shift
+                ;;
+            -h|--help)
+                show_usage
+                exit 0
+                ;;
+            -*)
+                log "ERROR" "Unknown option: $1"
+                show_usage
+                exit 1
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    
+    # Parse commands
     case "${1:-}" in
         "start")
             if [[ -z "${2:-}" ]]; then

@@ -57,7 +57,7 @@ fi
 
 # Create necessary directories
 echo -e "${BLUE}Creating directories...${NC}"
-mkdir -p "$CLAUDE_REFACTOR_HOME"/{sessions,logs,templates,prompts,config}
+mkdir -p "$CLAUDE_REFACTOR_HOME"/{sessions,logs,templates,prompts,config,lib}
 echo -e "${GREEN}✓ Created ~/.claude-refactor directories${NC}"
 
 # Copy prompts and config
@@ -74,6 +74,17 @@ if [[ -d "$SOURCE_DIR/config" ]]; then
     echo -e "${GREEN}✓ Installed configuration${NC}"
 else
     echo -e "${YELLOW}⚠ Warning: config directory not found${NC}"
+fi
+
+# Copy lib directory
+if [[ -d "$SOURCE_DIR/lib" ]]; then
+    cp -r "$SOURCE_DIR/lib" "$CLAUDE_REFACTOR_HOME/"
+    chmod +x "$CLAUDE_REFACTOR_HOME/lib"/*.sh 2>/dev/null || true
+    echo -e "${GREEN}✓ Installed executor library${NC}"
+else
+    # Create lib directory and basic executor if not present
+    mkdir -p "$SOURCE_DIR/lib"
+    echo -e "${YELLOW}⚠ Warning: lib directory not found, creating basic structure${NC}"
 fi
 
 # Install the CLI

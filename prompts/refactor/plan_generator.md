@@ -187,8 +187,29 @@ Phase 1: [Name] (Week 1-2)
 5. **Specify agent types** for task assignments
 6. **Provide technical context** for implementation agents
 
-## Output
+## Output Requirements
 
-Save your comprehensive plan to `artifacts/PLAN.md`
+### File Creation
+You MUST create the plan file with this EXACT format:
+
+```
+<<<CREATE_FILE: PLAN.md
+[Your complete implementation plan here]
+>>>END_FILE
+```
+
+### Status Marker
+End your response with:
+```
+<<<STATUS: COMPLETE
+- Created: PLAN.md
+- Summary: Generated comprehensive implementation plan with [X] phases
+>>>END_STATUS
+```
+
+### Alternative (if file markers don't work)
+If the above format isn't recognized, use:
+1. Ensure directory exists: `mkdir -p artifacts`
+2. Save to: `artifacts/PLAN.md`
 
 Remember: This plan will guide multiple implementation agents through a complex refactor. Clarity, completeness, and technical accuracy are paramount.
